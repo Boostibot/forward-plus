@@ -1,0 +1,263 @@
+#version 430 core
+#extension GL_ARB_shader_storage_buffer_object : require
+#extension ARB_shader_image_load_store : require
+
+#define MAX_LIGHTS_PER_TILE 1024
+
+#ifndef CUSTOM_DEFINES
+#define BLOCK_SIZE_X 16
+#define BLOCK_SIZE_Y 16
+#define BLOCK_SIZE_Z 1
+#endif
+
+layout (local_size_x = BLOCK_SIZE_X, local_size_y = BLOCK_SIZE_Y, local_size_z = BLOCK_SIZE_Z) in;
+
+layout(r32f,   binding = 0) uniform image2D depth_texture;
+layout(rg32ui, binding = 1) uniform uimage2D o_light_tiles;
+layout(rg32ui, binding = 2) uniform uimage2D t_light_tiles;
+layout(rgba32f, binding = 3) uniform image2D debug_texture;
+
+struct Plane {
+    vec3 n;
+    float d;
+};
+
+struct Sphere {
+    vec3 c;
+    float r;
+};
+
+struct Light {
+    vec3 c;
+    float r;
+};
+
+#define FRUSTUM_SIDE_LEFT 0
+#define FRUSTUM_SIDE_RIGHT 1
+#define FRUSTUM_SIDE_TOP 2
+#define FRUSTUM_SIDE_BOT 3
+struct View_Frustum {
+    float near_plane;
+    float far_plane;
+
+    Plane sides[4];
+};
+
+layout(binding = 3, std430) buffer uniform_buffer { 
+    vec2 screen_dimensions;
+    uint light_count;
+    mat4 projection;
+    mat4 inverse_projection;
+    mat4 view;
+};
+layout(binding = 4, std430) buffer lights_buffer { Light lights[]; };
+
+layout(binding = 5, std430) buffer o_light_counter_buffer { uint o_light_counter; };
+layout(binding = 6, std430) buffer t_light_counter_buffer { uint t_light_counter; };
+layout(binding = 7, std430) buffer t_light_indices_buffer { uint t_light_indices[]; };
+layout(binding = 8, std430) buffer o_light_indices_buffer { uint o_light_indices[]; };
+
+
+shared uint shared_depth_min;
+shared uint shared_depth_max;
+
+shared uint o_tile_light_count;
+shared uint o_tile_light_index_start;
+shared uint o_tile_light_list[MAX_LIGHTS_PER_TILE];
+
+shared uint t_tile_light_count;
+shared uint t_tile_light_index_start;
+shared uint t_tile_light_list[MAX_LIGHTS_PER_TILE];
+
+vec4 clip_to_view(vec4 clip)
+{
+    vec4 view = inverse_projection*clip;
+    view = view / view.w;
+ 
+    return view;
+}
+
+vec4 screen_to_clip(vec4 screen)
+{
+    vec2 tex_coord = screen.xy / screen_dimensions;
+ 
+    vec4 clip = vec4(vec2(tex_coord.x, tex_coord.y)*2 - 1, screen.z, screen.w);
+    return clip;
+}
+ 
+vec4 screen_to_view(vec4 screen)
+{
+    vec4 clip = screen_to_clip(screen);
+    return clip_to_view(clip);
+}
+
+float point_plane_signed_dist(vec3 point, Plane plane)
+{
+    return dot(plane.n, point) - plane.d;
+}
+
+bool is_sphere_behind_plane(Sphere sphere, Plane plane)
+{
+    return point_plane_signed_dist(sphere.c, plane) < -sphere.r;
+}
+
+bool is_sphere_partially_inside_frustum(Sphere sphere, View_Frustum frustum)
+{
+    if (sphere.c.z - sphere.r > frustum.near_plane || sphere.c.z + sphere.r < frustum.far_plane)
+        return false;
+ 
+    for(int i = 0; i < 4; i++)
+        if(is_sphere_behind_plane(sphere, frustum.sides[i]));
+            return false;
+ 
+    return true;
+}
+
+//p0 is center point.
+Plane plane_from_triangle(vec3 p0, vec3 p1, vec3 p2)
+{
+    vec3 v0 = p1 - p0;
+    vec3 v2 = p2 - p0;
+ 
+    Plane plane;
+    plane.n = normalize(cross(v0, v2));
+    plane.d = dot(plane.n, p0);
+ 
+    return plane;
+}
+
+float point_line_dist(vec3 line_offset, vec3 line_dir, vec3 point)
+{
+    vec3 point_dir = point - line_offset;
+    vec3 base = dot(line_dir, point_dir)/dot(line_dir, line_dir)*line_dir;
+    return length(base - point_dir);
+}
+
+float point_line_dist_one_sided(vec3 line_offset, vec3 line_dir, vec3 point)
+{
+    vec3 point_dir = point - line_offset;
+    float scale = dot(line_dir, point_dir)/dot(line_dir, line_dir);
+    if(scale < 0)
+        return 1e35;
+    vec3 base = scale*line_dir;
+    return length(base - point_dir);
+}
+
+float LinearizeDepth(float depth, float near, float far) 
+{
+    float z = depth * 2.0 - 1.0; // back to NDC 
+    return (2.0 * near * far) / (far + near - z * (far - near));	
+}
+
+void main() {
+    
+    if(gl_GlobalInvocationID.x >= imageSize(depth_texture).x || gl_GlobalInvocationID.y >= imageSize(depth_texture).y)
+        return;
+
+    vec2 coord = vec2(gl_GlobalInvocationID.xy);
+    //vec2 coord = vec2(gl_GlobalInvocationID.xy)/imageSize(depth_texture).xy;
+    const uint BLOCK_SIZE = gl_WorkGroupSize.x*gl_WorkGroupSize.y;
+    //calculate frustum
+    #if 0
+    View_Frustum frustum;
+    {
+        vec4 screen_space[4];
+        screen_space[0] = vec4(vec2(gl_WorkGroupID.x,   gl_WorkGroupID.y)   * gl_WorkGroupSize.xy, -1, 1); //top left
+        screen_space[1] = vec4(vec2(gl_WorkGroupID.x+1, gl_WorkGroupID.y)   * gl_WorkGroupSize.xy, -1, 1); //top right
+        screen_space[2] = vec4(vec2(gl_WorkGroupID.x,   gl_WorkGroupID.y+1) * gl_WorkGroupSize.xy, -1, 1); //bottom left
+        screen_space[3] = vec4(vec2(gl_WorkGroupID.x+1, gl_WorkGroupID.y+1) * gl_WorkGroupSize.xy, -1, 1); //bottom right
+
+        vec3 view_space[4];
+        // Now convert the screen space points to view space
+        for ( int i = 0; i < 4; i++ )
+            view_space[i] = screen_to_view(screen_space[i]).xyz;
+
+        vec3 eye_pos = vec3(0, 0, 0);
+        frustum.sides[FRUSTUM_SIDE_LEFT]  = plane_from_triangle(eye_pos, view_space[2], view_space[0]);
+        frustum.sides[FRUSTUM_SIDE_RIGHT] = plane_from_triangle(eye_pos, view_space[1], view_space[3]);
+        frustum.sides[FRUSTUM_SIDE_TOP]   = plane_from_triangle(eye_pos, view_space[0], view_space[1]);
+        frustum.sides[FRUSTUM_SIDE_BOT]   = plane_from_triangle(eye_pos, view_space[3], view_space[2]);
+    }
+    #endif
+
+    float depth = imageLoad(depth_texture, ivec2(gl_GlobalInvocationID.xy)).r;
+    uint udepth = floatBitsToUint(depth);
+    
+    if(gl_LocalInvocationIndex == 0)
+    {
+        shared_depth_min = udepth;
+        shared_depth_max = udepth;
+
+        o_tile_light_count = 0;
+        o_tile_light_index_start = atomicAdd(o_light_counter, 1);
+        
+        t_tile_light_count = 0;
+        t_tile_light_index_start = atomicAdd(t_light_counter, 1);
+    }
+
+    memoryBarrier();
+    barrier();
+    
+    atomicMin(shared_depth_min, udepth);
+    atomicMax(shared_depth_max, udepth);
+    
+    memoryBarrierShared();
+    barrier();
+
+    float max_depth = uintBitsToFloat(shared_depth_max);
+    float min_depth = uintBitsToFloat(shared_depth_min);
+
+    float min_depth_view = LinearizeDepth(min_depth, 0.1, 100);
+    float max_depth_view = LinearizeDepth(max_depth, 0.1, 100);
+    float near_clip_view = LinearizeDepth(0,         0.1, 100);
+    //float min_depth_view = clip_to_view(vec4(0, 0, min_depth, 1)).z;
+    //float max_depth_view = clip_to_view(vec4(0, 0, max_depth, 1)).z;
+    //float near_clip_view = clip_to_view(vec4(0, 0, 0, 1)).z;
+
+    //frustum.near_plane = near_clip_view;
+    //frustum.far_plane = max_depth_view;
+
+    // Clipping plane for minimum depth value 
+    // (used for testing lights within the bounds of opaque geometry).
+    Plane minPlane = Plane(vec3( 0, 0, -1 ), -min_depth_view);
+
+    for(uint i = gl_LocalInvocationIndex; i < light_count; i += BLOCK_SIZE)
+    {
+        vec4 sphere_center = view*vec4(lights[i].c, 1);
+        Sphere light_sphere = Sphere(sphere_center.xyz, lights[i].r);
+        
+        vec4 center_screen = vec4(coord, -1, 1);
+        vec4 center_view = screen_to_view(center_screen);
+        float dist = point_line_dist_one_sided(vec3(0), center_view.xyz, light_sphere.c);
+
+        if(dist < light_sphere.r)
+        //if(is_sphere_partially_inside_frustum(light_sphere, frustum))
+        {
+            if(t_tile_light_count < MAX_LIGHTS_PER_TILE)
+                t_tile_light_list[atomicAdd(t_tile_light_count, 1)] = i;
+
+            if(light_sphere.c.z - light_sphere.r < max_depth_view)
+            {
+                if(o_tile_light_count < MAX_LIGHTS_PER_TILE)
+                    o_tile_light_list[atomicAdd(o_tile_light_count, 1)] = i;
+            }
+        }
+    }
+    
+    memoryBarrierShared();
+    barrier();
+
+    if(gl_LocalInvocationIndex == 0)
+    {
+        imageStore(o_light_tiles, ivec2(gl_WorkGroupID.xy), uvec4(o_tile_light_index_start, o_tile_light_count, 0, 0));
+        imageStore(t_light_tiles, ivec2(gl_WorkGroupID.xy), uvec4(t_tile_light_index_start, t_tile_light_count, 0, 0));
+    }
+
+    for (uint i = gl_LocalInvocationIndex; i < o_tile_light_count; i += BLOCK_SIZE )
+        o_light_indices[o_tile_light_index_start + i] = o_tile_light_list[i];
+
+    for (uint i = gl_LocalInvocationIndex; i < t_tile_light_count; i += BLOCK_SIZE )
+        t_light_indices[t_tile_light_index_start + i] = t_tile_light_list[i];
+        
+    imageStore(debug_texture, ivec2(gl_GlobalInvocationID.xy), uvec4(t_tile_light_count, o_tile_light_count, 0, 0));
+}

@@ -1,4 +1,4 @@
-#define _CRT_SECURE_NO_WARNINGS
+﻿#define _CRT_SECURE_NO_WARNINGS
 #pragma warning(error:4820)   //error on "Padding added to struct" 
 #pragma warning(disable:4702) //Dissable "unrelachable code"
 #pragma warning(disable:4464) //Dissable "relative include path contains '..'"
@@ -97,27 +97,6 @@ typedef enum Control_Type {
 } Control_Type;
 
 typedef struct Control_Inputs {
-    //for the moment we differentiate only between two types of input:
-    // discrete range (usually just on/off) style "keys" (keys, mouse buttons etc) 
-    // and contiguous range "smooths" (mouse position, scroll wheel, dials).
-
-    //"keys" operate on live values: that is after each frame we discard the contents
-    //of states by setting it to 0 and wait for new values to come in.
-    //On the other hand "smooths" operate on kept values: smooth_states are kept between frames.
-
-    //The reason for this distinction is quite subtle. Each approach has its pros and cons:
-    // live values: There is no kept state. Having it less state in our program makes it harder for
-    //              bugs to propagate.
-    // kept values: For smooth inputs live values would mean something like "the mouse was *moved* by
-    //              20 pixels to the right as that is what hardware usually reports. However we run into
-    //              a risk of drifting values. Over a long time small errors in the representation could
-    //              pile up and the value that corresponds to the gamepad stick being in the upright position
-    //              would no longer match. Because of this its safer to make smooth inputs kept. 
-    //              (The reason why this isnt a problem for keys is that they are fundamentally discrete so the
-    //              errors dont accumulate)
-    // 
-    //              Big dissadvatnga of kept values is that we cannot really make sense of the slots anymore! 
-    //              This is because all slots should always report some value! just because we didnt interact with
 
     u8 states[CONTROL_MAX_KEYS];
     u8 interacts[CONTROL_MAX_KEYS];
@@ -383,6 +362,199 @@ void process_input(App_State* app);
 void set_default_controls(App_Controls* controls);
 void set_default_settings(App_Settings* settings);
 
+typedef struct Plane {
+    Vec3 n;
+    float d;
+} Plane;
+
+typedef struct Sphere {
+    Vec3 c;
+    float r;
+} Sphere;
+
+typedef struct AABB {
+    Vec3 pos;
+    Vec3 half_size;
+} AABB;
+
+
+typedef struct Frustum {
+    float near_offset;
+    float far_offset;
+    
+    Vec2 near_size;
+    Vec2 far_size;
+
+    Vec3 look_direction;
+    Vec3 pos;
+} Frustum;
+
+typedef struct Frustum_Planes {
+    Plane planes[6];
+} Frustum_Planes;
+
+typedef struct Forward_Plus_Buffers {
+    Render_Shader compute;
+    GLuint framebuffer_depth;
+
+    GLuint tex_debug;
+    GLuint tex_depth;
+    GLuint tex_depth2;
+    GLuint tex_color;
+    GLuint tex_o_light_tiles;
+    GLuint tex_t_light_tiles;
+
+    GLuint buff_uniform;
+    GLuint buff_lights;
+    
+    GLuint buff_o_light_counter;
+    GLuint buff_t_light_counter;
+    
+    GLuint buff_o_light_indices;
+    GLuint buff_t_light_indices;
+
+    GLuint _padding;
+
+    i32 group_size_x;
+    i32 group_size_y;
+
+    i32 tex_width;
+    i32 tex_height;
+    
+    i32 lights_capacity;
+    i32 indices_capacity;
+
+} Forward_Plus_Buffers;
+
+typedef struct Forward_Plus_Light {
+    Vec4 center_and_radius;
+} Forward_Plus_Light;
+
+typedef struct Forward_Plus_Uniform_Buffer {
+    ATTRIBUTE_ALIGNED(8) Vec2 screen_dimensions;
+    ATTRIBUTE_ALIGNED(4) u32 light_count;
+    ATTRIBUTE_ALIGNED(4) u32 _padding;
+    ATTRIBUTE_ALIGNED(16) Mat4 projection;
+    ATTRIBUTE_ALIGNED(16) Mat4 inverse_projection;
+    ATTRIBUTE_ALIGNED(16) Mat4 view;
+} Forward_Plus_Uniform_Buffer;
+
+Forward_Plus_Buffers make_forward_plus_buffers(i32 tex_width, i32 tex_height, i32 lights_capacity, i32 avg_indeces_per_block)
+{
+    i32 indices_capacity = tex_width*tex_height / (16*16) * avg_indeces_per_block;
+    Forward_Plus_Buffers out = {0};
+    out.tex_width = tex_width;
+    out.tex_height = tex_height;
+    out.lights_capacity = lights_capacity;
+    out.indices_capacity = indices_capacity;
+    
+    GLuint pad = 0;
+
+    glGenFramebuffers(1, &out.framebuffer_depth);
+    glBindFramebuffer(GL_FRAMEBUFFER, out.framebuffer_depth);
+
+	glGenTextures(1, &out.tex_depth);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, out.tex_depth);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexImage2D(GL_TEXTURE_2D, 0,  GL_DEPTH_COMPONENT32F, (GLuint) tex_width + pad, (GLuint) tex_height + pad, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, out.tex_depth, 0);
+
+    glGenTextures(1, &out.tex_color);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, out.tex_color);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLuint) tex_width, (GLuint) tex_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, out.tex_color, 0);
+    TEST(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    
+	glGenTextures(1, &out.tex_depth2);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, out.tex_depth2);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, (GLuint) tex_width + pad, (GLuint) tex_height + pad, 0, GL_RED, GL_FLOAT, NULL);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+	glGenTextures(1, &out.tex_debug);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, out.tex_debug);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, (GLuint) tex_width + pad, (GLuint) tex_height + pad, 0, GL_RGBA, GL_FLOAT, NULL);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+	glGenTextures(1, &out.tex_o_light_tiles);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, out.tex_o_light_tiles);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32UI, (GLuint) tex_width, (GLuint) tex_height, 0, GL_RG_INTEGER, GL_UNSIGNED_INT, NULL);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    
+	glGenTextures(1, &out.tex_t_light_tiles);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, out.tex_t_light_tiles);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32UI, (GLuint) tex_width, (GLuint) tex_height, 0, GL_RG_INTEGER, GL_UNSIGNED_INT, NULL);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenBuffers(1, &out.buff_uniform);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, out.buff_uniform);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(Forward_Plus_Uniform_Buffer), NULL, GL_DYNAMIC_DRAW); 
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, out.buff_uniform);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+    glGenBuffers(1, &out.buff_lights);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, out.buff_lights);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(Forward_Plus_Light)*lights_capacity, NULL, GL_DYNAMIC_DRAW); 
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, out.buff_lights);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    
+    glGenBuffers(1, &out.buff_o_light_counter);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, out.buff_o_light_counter);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(u32), NULL, GL_DYNAMIC_DRAW); 
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, out.buff_o_light_counter);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    
+    glGenBuffers(1, &out.buff_t_light_counter);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, out.buff_t_light_counter);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(u32), NULL, GL_DYNAMIC_DRAW); 
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, out.buff_t_light_counter);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+    glGenBuffers(1, &out.buff_o_light_indices);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, out.buff_o_light_indices);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(u32)*indices_capacity, NULL, GL_DYNAMIC_DRAW); 
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, out.buff_o_light_indices);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    
+    glGenBuffers(1, &out.buff_t_light_indices);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, out.buff_t_light_indices);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(u32)*indices_capacity, NULL, GL_DYNAMIC_DRAW); 
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, out.buff_t_light_indices);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+    out.group_size_x = 16;
+    out.group_size_y = 16;
+    compute_shader_init_from_disk(&out.compute, STRING("light_binning.comp"), 16, 16, 1);
+    //compute_shader_init_from_disk(&out.compute, STRING("new_shaders/image_copy.comp"), 16, 16, 1);
+
+    return out;
+}
+
+void compute_texture_bind(GLenum texture, GLenum access, GLenum internal_format, isize slot)
+{
+	glBindImageTexture((GLuint) slot, texture, 0, GL_FALSE, 0, access, internal_format);
+    //glBindTextureUnit((i32) slot, texture);
+}
+
 int main()
 {
     //Jot things
@@ -410,7 +582,7 @@ int main()
 
     // glfw: initialize and configure
     glfwInit();
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, true);  
@@ -432,84 +604,45 @@ int main()
     Render_Shader shaderGeometryPass = {0};
     Render_Shader shaderLightingPass = {0};
     Render_Shader shaderLightBox = {0};
+    Render_Shader shader_depth_only = {0};
+    Render_Shader shader_fullscreen_quad = {0};
     TEST(render_shader_init_from_disk_split(&shaderGeometryPass, STRING("new_shaders/g_buffer.vert"), STRING("new_shaders/g_buffer.frag"), STRING()));
     TEST(render_shader_init_from_disk_split(&shaderLightingPass, STRING("new_shaders/deferred_shading.vert"), STRING("new_shaders/deferred_shading.frag"), STRING()));
     TEST(render_shader_init_from_disk_split(&shaderLightBox,     STRING("new_shaders/deferred_light_box.vert"), STRING("new_shaders/deferred_light_box.frag"), STRING()));
+    TEST(render_shader_init_from_disk_split(&shader_depth_only,  STRING("new_shaders/depth_only.vert"), STRING("new_shaders/depth_only.frag"), STRING()));
+    TEST(render_shader_init_from_disk_split(&shader_fullscreen_quad,  STRING("fullscreen_quad.vert"), STRING("fullscreen_quad.frag"), STRING()));
 
-    // load models
-    // -----------
+    Forward_Plus_Buffers forward_plus_buffers = make_forward_plus_buffers(SCR_WIDTH, SCR_HEIGHT, 512, 200);
+
     typedef Array(Vec3) Vec3_Array;
-    Vec3_Array objectPositions = {0};
-    array_push(&objectPositions, vec3(-3.0,  -0.5, -3.0));
-    array_push(&objectPositions, vec3( 0.0,  -0.5, -3.0));
-    array_push(&objectPositions, vec3( 3.0,  -0.5, -3.0));
-    array_push(&objectPositions, vec3(-3.0,  -0.5,  0.0));
-    array_push(&objectPositions, vec3( 0.0,  -0.5,  0.0));
-    array_push(&objectPositions, vec3( 3.0,  -0.5,  0.0));
-    array_push(&objectPositions, vec3(-3.0,  -0.5,  3.0));
-    array_push(&objectPositions, vec3( 0.0,  -0.5,  3.0));
-    array_push(&objectPositions, vec3( 3.0,  -0.5,  3.0));
-
-    // configure g-buffer framebuffer
-    // ------------------------------
-    unsigned int gBuffer;
-    glGenFramebuffers(1, &gBuffer);
-    glBindFramebuffer(GL_FRAMEBUFFER, gBuffer);
-    unsigned int gPosition, gNormal, gAlbedoSpec;
-    // position color buffer
-    glGenTextures(1, &gPosition);
-    glBindTexture(GL_TEXTURE_2D, gPosition);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, SCR_WIDTH, SCR_HEIGHT, 0, GL_RGBA, GL_FLOAT, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gPosition, 0);
-    // normal color buffer
-    glGenTextures(1, &gNormal);
-    glBindTexture(GL_TEXTURE_2D, gNormal);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, SCR_WIDTH, SCR_HEIGHT, 0, GL_RGBA, GL_FLOAT, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, gNormal, 0);
-    // color + specular color buffer
-    glGenTextures(1, &gAlbedoSpec);
-    glBindTexture(GL_TEXTURE_2D, gAlbedoSpec);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, SCR_WIDTH, SCR_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, gAlbedoSpec, 0);
-    // tell OpenGL which color attachments we'll use (of this framebuffer) for rendering 
-    unsigned int attachments[3] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2 };
-    glDrawBuffers(3, attachments);
-    // create and attach depth buffer (renderbuffer)
-    unsigned int rboDepth;
-    glGenRenderbuffers(1, &rboDepth);
-    glBindRenderbuffer(GL_RENDERBUFFER, rboDepth);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, SCR_WIDTH, SCR_HEIGHT);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rboDepth);
-    // finally check if framebuffer is complete
-    TEST(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-    // lighting info
-    // -------------
-    const unsigned int NR_LIGHTS = 32;
-    Vec3_Array lightPositions = {0};
-    Vec3_Array lightColors = {0};
-    srand(13);
-    for (unsigned int i = 0; i < NR_LIGHTS; i++)
+    typedef Array(Vec4) Vec4_Array;
+    Vec3_Array cube_positions = {0};
+    Vec4_Array lights = {0};
+    Vec3_Array lights_color = {0};
+    
+    *random_state() = random_state_from_seed(0);
+    for (unsigned int i = 0; i < 64; i++)
     {
-        // calculate slightly random offsets
-        float x = (rand()%100 / 100.0f)*6.0f;
-        float y = (rand()%100 / 100.0f)*6.0f;
-        float z = (rand()%100 / 100.0f)*6.0f;
-        array_push(&lightPositions, vec3(x, y, z));
-        // also calculate random color
-        float r = (rand()%100 / 200.0f) + 0.5f; // between 0.5 and 1.0
-        float g = (rand()%100 / 200.0f) + 0.5f; // between 0.5 and 1.0
-        float b = (rand()%100 / 200.0f) + 0.5f; // between 0.5 and 1.0
-        array_push(&lightColors, vec3(r, g, b));
+        float x = random_interval_f32(-6, 6);
+        float y = random_interval_f32(-6, 6);
+        float z = random_interval_f32(-6, 6);
+        array_push(&cube_positions, vec3(x, y, z));
     }
     
+    const unsigned int NR_LIGHTS = 10;
+    for (unsigned int i = 0; i < NR_LIGHTS; i++)
+    {
+        float x = random_interval_f32(-6, 6);
+        float y = random_interval_f32(-6, 6);
+        float z = random_interval_f32(-6, 6);
+        float R = random_interval_f32(0.5, 2);
+        array_push(&lights, vec4(x, y, z, R));
+        
+        float r = random_interval_f32(0.5f, 1);
+        float g = random_interval_f32(0.5f, 1);
+        float b = random_interval_f32(0.5f, 1);
+        array_push(&lights_color, vec3(r, g, b));
+    }
     glEnable(GL_DEPTH_TEST);
     
     render_shader_use(&shaderLightingPass);
@@ -517,7 +650,6 @@ int main()
     render_shader_set_i32(&shaderLightingPass, "gNormal", 1);
     render_shader_set_i32(&shaderLightingPass, "gAlbedoSpec", 2);
 
-    Mat4 view = {0};
     // render loop
     // -----------
     while (!glfwWindowShouldClose(app.window))
@@ -529,83 +661,104 @@ int main()
         window_poll_input(&app);
         process_input(&app);
 
-        camera_set_perspective(&app.curr.camera, app.curr.fov, (f32)app.curr.framebuffer_width/(f32)app.curr.framebuffer_height, 0.01f, 1000.0f);
+        camera_set_perspective(&app.curr.camera, app.curr.fov, (f32)app.curr.framebuffer_width/(f32)app.curr.framebuffer_height, 0.1f, 100.0f);
         if(app.curr.framebuffer_width != app.prev.framebuffer_width || app.curr.framebuffer_height != app.prev.framebuffer_height)
             glViewport(0, 0, app.curr.framebuffer_width, app.curr.framebuffer_height);
+        
+        
+        Mat4 projection = camera_get_projection_matrix(app.curr.camera);
+        Mat4 view = camera_get_view_matrix(app.curr.camera);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, forward_plus_buffers.framebuffer_depth);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); // we're not using the stencil buffer now
+
+        render_shader_use(&shader_depth_only);
+        render_shader_set_mat4(&shader_depth_only, "projection", projection);
+        render_shader_set_mat4(&shader_depth_only, "view", view);
+        for (unsigned int i = 0; i < cube_positions.size; i++)
+        {
+            Mat4 model = mat4_translate(mat4_scaling(vec3_of(0.125f)), cube_positions.data[i]);
+            
+            render_shader_set_mat4(&shader_depth_only, "model", model);
+            renderCube();
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+        glMemoryBarrier(GL_ALL_BARRIER_BITS);
+        
+        //TLDR: compute shaders just dont accept GL_DEPTH_COMPONENT32F as an input.
+        // Somehow... for some reason... I hate Opengl with passion.
+        glCopyImageSubData(
+            forward_plus_buffers.tex_depth, GL_TEXTURE_2D, 0, 0, 0, 0,
+            forward_plus_buffers.tex_depth2, GL_TEXTURE_2D, 0, 0, 0, 0,
+            SCR_WIDTH, SCR_HEIGHT, 1);
+
+        
+        Forward_Plus_Uniform_Buffer uniforms = {0};
+        uniforms.screen_dimensions = vec2(SCR_WIDTH, SCR_HEIGHT);
+        uniforms.light_count = (u32) lights.size;
+        uniforms.projection = projection;
+        uniforms.inverse_projection = mat4_inverse(projection);
+        uniforms.view = view;
+
+        u32 zero_counter = 0;
+        glNamedBufferSubData(forward_plus_buffers.buff_uniform, 0, sizeof uniforms, &uniforms);
+        glNamedBufferSubData(forward_plus_buffers.buff_lights, 0, array_byte_size(lights), lights.data);
+        glNamedBufferSubData(forward_plus_buffers.buff_o_light_counter, 0, sizeof zero_counter, &zero_counter);
+        glNamedBufferSubData(forward_plus_buffers.buff_t_light_counter, 0, sizeof zero_counter, &zero_counter);
+
+        render_shader_use(&forward_plus_buffers.compute);
+        compute_texture_bind(forward_plus_buffers.tex_depth2, GL_READ_ONLY, GL_R32F, 0);
+        compute_texture_bind(forward_plus_buffers.tex_o_light_tiles, GL_WRITE_ONLY, GL_RG32UI, 1);
+        compute_texture_bind(forward_plus_buffers.tex_t_light_tiles, GL_WRITE_ONLY, GL_RG32UI, 2);
+        compute_texture_bind(forward_plus_buffers.tex_debug, GL_WRITE_ONLY, GL_RGBA32F, 3);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, forward_plus_buffers.buff_uniform);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, forward_plus_buffers.buff_lights);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, forward_plus_buffers.buff_o_light_counter);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, forward_plus_buffers.buff_t_light_counter);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, forward_plus_buffers.buff_o_light_indices);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 8, forward_plus_buffers.buff_t_light_indices);
+
+        glMemoryBarrier(GL_ALL_BARRIER_BITS);
+        compute_shader_dispatch(&forward_plus_buffers.compute, SCR_WIDTH, SCR_HEIGHT, 1);
+		glMemoryBarrier(GL_ALL_BARRIER_BITS);
+        
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        Mat4 projection = camera_get_projection_matrix(app.curr.camera);
-        view = camera_get_view_matrix(app.curr.camera);
         
-        // 1. geometry pass: render scene's geometry/color data into gbuffer
-        glBindFramebuffer(GL_FRAMEBUFFER, gBuffer);
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-            
-            render_shader_use(&shaderGeometryPass);
-            render_shader_set_mat4(&shaderGeometryPass, "projection", projection);
-            render_shader_set_mat4(&shaderGeometryPass, "view", view);
-            for (unsigned int i = 0; i < objectPositions.size; i++)
-            {
-                Mat4 model = mat4_identity();
-                model = mat4_scale_affine(model, vec3_of(0.5f));
-                model = mat4_translate(model, objectPositions.data[i]);
-                render_shader_set_mat4(&shaderGeometryPass, "model", model);
-                renderCube();
-            }
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-        // 2. lighting pass: calculate lighting by iterating over a screen filled quad pixel-by-pixel using the gbuffer's content.
-        render_shader_use(&shaderLightingPass);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        render_shader_use(&shader_fullscreen_quad);
+        render_shader_set_i32(&shader_fullscreen_quad, "u_tex_depth", 0);
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, gPosition);
+        glBindTexture(GL_TEXTURE_2D, forward_plus_buffers.tex_depth);
+        
+        render_shader_set_i32(&shader_fullscreen_quad, "u_tex_color", 1);
         glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, gNormal);
+        glBindTexture(GL_TEXTURE_2D, forward_plus_buffers.tex_color);
+        
+        render_shader_set_i32(&shader_fullscreen_quad, "u_tex_debug", 2);
         glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, gAlbedoSpec);
-        // send light relevant uniforms
-        for (int i = 0; i < lightPositions.size; i++)
-        {
-            render_shader_set_vec3(&shaderLightingPass, format_ephemeral("lights[%i].Position", i).data, lightPositions.data[i]);
-            render_shader_set_vec3(&shaderLightingPass, format_ephemeral("lights[%i].Color", i).data, lightColors.data[i]);
-            // update attenuation parameters and calculate radius
-            const float linear = 0.7f;
-            const float quadratic = 1.8f;
-            render_shader_set_f32(&shaderLightingPass, format_ephemeral("lights[%i].Linear", i).data, linear);
-            render_shader_set_f32(&shaderLightingPass, format_ephemeral("lights[%i].Quadratic", i).data, quadratic);
-        }
-        render_shader_set_vec3(&shaderLightingPass, "viewPos", app.curr.camera.pos);
-        // finally render quad
+        glBindTexture(GL_TEXTURE_2D, forward_plus_buffers.tex_debug);
+
+        glDepthMask(false);
         renderQuad();
-
-        // 2.5. copy content of geometry's depth buffer to default framebuffer's depth buffer
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, gBuffer);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); // write to default framebuffer
-        // blit to default framebuffer. Note that this may or may not work as the internal formats of both the FBO and default framebuffer have to match.
-        // the internal formats are implementation defined. This works on all of my systems, but if it doesn't on yours you'll likely have to write to the 		
-        // depth buffer in another shader stage (or somehow see to match the default framebuffer's internal format with the FBO's internal format).
-        glBlitFramebuffer(0, 0, SCR_WIDTH, SCR_HEIGHT, 0, 0, SCR_WIDTH, SCR_HEIGHT, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-        // 3. render lights on top of scene
+        glDepthMask(true);
+        
         render_shader_use(&shaderLightBox);
         render_shader_set_mat4(&shaderLightBox, "projection", projection);
         render_shader_set_mat4(&shaderLightBox, "view", view);
-        for (unsigned int i = 0; i < lightPositions.size; i++)
+        for (unsigned int i = 0; i < lights.size; i++)
         {
-            Mat4 model = mat4_identity();
-            model = mat4_scale_affine(model, vec3_of(0.125f));
-            model = mat4_translate(model, lightPositions.data[i]);
-            
+            Mat4 model = mat4_translate(mat4_scaling(vec3_of(0.125f)), vec3_from_vec4(lights.data[i]));
             render_shader_set_mat4(&shaderLightBox, "model", model);
-            render_shader_set_vec3(&shaderLightBox, "lightColor", lightColors.data[i]);
+            //render_shader_set_vec3(&shaderLightBox, "lightColor", lights_color.data[i]);
+            render_shader_set_vec3(&shaderLightBox, "lightColor", vec3(1, 0, 0));
             renderCube();
         }
 
         glfwSwapBuffers(app.window);
         app.curr.frame_index += 1;
         app.prev = app.curr;
+        
     }
 
     glfwTerminate();

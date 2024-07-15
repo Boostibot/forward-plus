@@ -241,5 +241,23 @@
     <None Include="new_shaders\g_buffer.vert">
       <Filter>new_shaders</Filter>
     </None>
+    <None Include="light_binning.comp">
+      <Filter>new_shaders</Filter>
+    </None>
+    <None Include="fullscreen_quad.vert">
+      <Filter>new_shaders</Filter>
+    </None>
+    <None Include="fullscreen_quad.frag">
+      <Filter>new_shaders</Filter>
+    </None>
+    <None Include="new_shaders\depth_only.vert">
+      <Filter>new_shaders</Filter>
+    </None>
+    <None Include="new_shaders\depth_only.frag">
+      <Filter>new_shaders</Filter>
+    </None>
+    <None Include="new_shaders\image_copy.comp">
+      <Filter>new_shaders</Filter>
+    </None>
   </ItemGroup>
 </Project>

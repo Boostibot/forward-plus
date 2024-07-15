@@ -16,13 +16,17 @@ GL_Pixel_Format gl_pixel_format_from_pixel_type(Pixel_Type pixel_format, isize c
     GL_Pixel_Format error_format = {0};
     
     GL_Pixel_Format out = {0};
-    
+
+    bool is_int = true;
+    if(pixel_format == PIXEL_TYPE_F64 || pixel_format == PIXEL_TYPE_F32 || pixel_format == PIXEL_TYPE_F16 || pixel_format == PIXEL_TYPE_F8)
+        is_int = false;
+
     switch(channels)
     {
-        case 1: out.access_format = GL_RED; break;
-        case 2: out.access_format =  GL_RG; break;
-        case 3: out.access_format =  GL_RGB; break;
-        case 4: out.access_format =  GL_RGBA; break;
+        case 1: out.access_format = is_int ? GL_RED_INTEGER : GL_RED; break;
+        case 2: out.access_format = is_int ? GL_RG_INTEGER : GL_RG; break;
+        case 3: out.access_format = is_int ? GL_RGB_INTEGER : GL_RGB; break;
+        case 4: out.access_format = is_int ? GL_RGBA_INTEGER : GL_RGBA; break;
         
         default: return error_format;
     }
@@ -39,11 +43,10 @@ GL_Pixel_Format gl_pixel_format_from_pixel_type(Pixel_Type pixel_format, isize c
             } \
         } break \
 
-
     switch(pixel_format)
     {
-        PIXEL_TYPE_CASE(PIXEL_TYPE_U8, GL_UNSIGNED_BYTE, 8);
-        PIXEL_TYPE_CASE(PIXEL_TYPE_U16, GL_UNSIGNED_SHORT, 16);
+        PIXEL_TYPE_CASE(PIXEL_TYPE_U8, GL_UNSIGNED_BYTE, 8UI);
+        PIXEL_TYPE_CASE(PIXEL_TYPE_U16, GL_UNSIGNED_SHORT, 16UI);
         PIXEL_TYPE_CASE(PIXEL_TYPE_U32, GL_UNSIGNED_INT, 32UI);
         case PIXEL_TYPE_U24: return error_format;
         case PIXEL_TYPE_U64: return error_format;

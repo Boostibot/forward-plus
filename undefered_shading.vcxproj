@@ -228,12 +228,18 @@
     <ClInclude Include="todo.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="fullscreen_quad.frag" />
+    <None Include="fullscreen_quad.vert" />
+    <None Include="light_binning.comp" />
     <None Include="new_shaders\deferred_light_box.frag" />
     <None Include="new_shaders\deferred_light_box.vert" />
     <None Include="new_shaders\deferred_shading.frag" />
     <None Include="new_shaders\deferred_shading.vert" />
+    <None Include="new_shaders\depth_only.frag" />
+    <None Include="new_shaders\depth_only.vert" />
     <None Include="new_shaders\g_buffer.frag" />
     <None Include="new_shaders\g_buffer.vert" />
+    <None Include="new_shaders\image_copy.comp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
