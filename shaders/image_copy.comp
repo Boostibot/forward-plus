@@ -17,5 +17,4 @@ layout(r32f, binding = 1) uniform image2D debug_texture;
 void main() {
     float depth = imageLoad(depth_texture, ivec2(gl_GlobalInvocationID.xy)).r;
     imageStore(debug_texture, ivec2(gl_GlobalInvocationID.xy), vec4(depth, depth, depth, 0));
-    //imageStore(debug_texture, ivec2(gl_GlobalInvocationID.xy), vec4(1, 1, 1, 0));
 }

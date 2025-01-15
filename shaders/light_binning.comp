@@ -123,6 +123,7 @@ void main() {
     if(gl_GlobalInvocationID.x >= imageSize(depth_texture).x || gl_GlobalInvocationID.y >= imageSize(depth_texture).y)
         return;
 
+    //calculate min and max of tile
     float depth = imageLoad(depth_texture, ivec2(gl_GlobalInvocationID.xy)).r;
     uint udepth = floatBitsToUint(depth);
     
@@ -132,10 +133,7 @@ void main() {
         shared_depth_max = udepth;
 
         o_tile_light_count = 0;
-        o_tile_light_index_start = atomicAdd(o_light_counter, 1);
-        
         t_tile_light_count = 0;
-        t_tile_light_index_start = atomicAdd(t_light_counter, 1);
     }
 
     memoryBarrier();
@@ -149,6 +147,17 @@ void main() {
 
     float max_depth = uintBitsToFloat(shared_depth_max);
     float min_depth = uintBitsToFloat(shared_depth_min);
+
+    //Do the actual light binning:
+    // iterate each light and check if it can possibly intersect the
+    // this tiles thrustum AND if this intersection is between min-max depth.
+    //
+    // Instead of testing against 4 thrustum planes we make an upper uproximate
+    // the tile thrustum with a cone of diamater equal to the half diagonal length.
+    // This doesnt lose any visual fidelity as we are still considering all lights
+    // as before + some extra. This is a worthy tradeoff since it makes this 
+    // shader A LOT faster - replacing loading from memory 4 thrustums and checking
+    // with just a single point-line distance calculation.
 
     float min_depth_view = LinearizeDepth(min_depth, near_plane, far_plane);
     float max_depth_view = LinearizeDepth(max_depth, near_plane, far_plane);
@@ -187,7 +196,8 @@ void main() {
                 if(t_tile_light_count < MAX_LIGHTS_PER_TILE)
                     t_tile_light_list[atomicAdd(t_tile_light_count, 1)] = i;
     
-                //add to the opaque list only if 
+                //add to the opaque list only if the light is not too far in front
+                // (ie. if it is possible for the light to touch some pixel between min-max depth)
                 if(c.z + r >= min_depth_view)
                 {
                     if(o_tile_light_count < MAX_LIGHTS_PER_TILE)
@@ -200,17 +210,25 @@ void main() {
     memoryBarrierShared();
     barrier();
 
+    //allocate the output light list
     if(gl_LocalInvocationIndex == 0)
     {
+        o_tile_light_index_start = atomicAdd(o_light_counter, o_tile_light_count);
+        t_tile_light_index_start = atomicAdd(t_light_counter, t_tile_light_count);
+
         imageStore(o_light_tiles, ivec2(gl_WorkGroupID.xy), uvec4(o_tile_light_index_start, o_tile_light_count, 0, 0));
         imageStore(t_light_tiles, ivec2(gl_WorkGroupID.xy), uvec4(t_tile_light_index_start, t_tile_light_count, 0, 0));
     }
+    
+    memoryBarrierShared();
+    barrier();
 
+    //fill in the light list for this tile
     for (uint i = gl_LocalInvocationIndex; i < o_tile_light_count; i += gl_WorkGroupSize.x*gl_WorkGroupSize.y)
         o_light_indices[o_tile_light_index_start + i] = o_tile_light_list[i];
 
     for (uint i = gl_LocalInvocationIndex; i < t_tile_light_count; i += gl_WorkGroupSize.x*gl_WorkGroupSize.y)
         t_light_indices[t_tile_light_index_start + i] = t_tile_light_list[i];
         
-    imageStore(debug_texture, ivec2(gl_GlobalInvocationID.xy), uvec4(t_tile_light_count, o_tile_light_count, 0, 0));
+    imageStore(debug_texture, ivec2(gl_GlobalInvocationID.xy), uvec4(o_tile_light_count, t_tile_light_count, 0, 0));
 }

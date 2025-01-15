@@ -13,8 +13,8 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
-    <Filter Include="new_shaders">
-      <UniqueIdentifier>{965f1e91-576c-4a8b-950a-f035147eff76}</UniqueIdentifier>
+    <Filter Include="shaders">
+      <UniqueIdentifier>{c413ad7d-e2f4-4c5a-82df-d952155f5c4d}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
@@ -223,50 +223,29 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <None Include="new_shaders\deferred_light_box.frag">
-      <Filter>new_shaders</Filter>
+    <None Include="shaders\depth_only.frag">
+      <Filter>shaders</Filter>
     </None>
-    <None Include="new_shaders\deferred_light_box.vert">
-      <Filter>new_shaders</Filter>
+    <None Include="shaders\depth_only.vert">
+      <Filter>shaders</Filter>
     </None>
-    <None Include="new_shaders\deferred_shading.frag">
-      <Filter>new_shaders</Filter>
+    <None Include="shaders\fullscreen_quad.frag">
+      <Filter>shaders</Filter>
     </None>
-    <None Include="new_shaders\deferred_shading.vert">
-      <Filter>new_shaders</Filter>
+    <None Include="shaders\fullscreen_quad.vert">
+      <Filter>shaders</Filter>
     </None>
-    <None Include="new_shaders\g_buffer.frag">
-      <Filter>new_shaders</Filter>
+    <None Include="shaders\image_copy.comp">
+      <Filter>shaders</Filter>
     </None>
-    <None Include="new_shaders\g_buffer.vert">
-      <Filter>new_shaders</Filter>
+    <None Include="shaders\light_binning.comp">
+      <Filter>shaders</Filter>
     </None>
-    <None Include="light_binning.comp">
-      <Filter>new_shaders</Filter>
+    <None Include="shaders\light_box.frag">
+      <Filter>shaders</Filter>
     </None>
-    <None Include="fullscreen_quad.vert">
-      <Filter>new_shaders</Filter>
-    </None>
-    <None Include="fullscreen_quad.frag">
-      <Filter>new_shaders</Filter>
-    </None>
-    <None Include="new_shaders\depth_only.vert">
-      <Filter>new_shaders</Filter>
-    </None>
-    <None Include="new_shaders\depth_only.frag">
-      <Filter>new_shaders</Filter>
-    </None>
-    <None Include="new_shaders\image_copy.comp">
-      <Filter>new_shaders</Filter>
-    </None>
-    <None Include="min_max_reduction.comp">
-      <Filter>new_shaders</Filter>
-    </None>
-    <None Include="min_max_reduction_simple.comp">
-      <Filter>new_shaders</Filter>
-    </None>
-    <None Include="light_binning2.comp">
-      <Filter>new_shaders</Filter>
+    <None Include="shaders\light_box.vert">
+      <Filter>shaders</Filter>
     </None>
   </ItemGroup>
 </Project>

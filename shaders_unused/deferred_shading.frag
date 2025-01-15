@@ -1,4 +1,5 @@
 #version 330 core
+//from learnopengl.com
 out vec4 FragColor;
 
 in vec2 TexCoords;
