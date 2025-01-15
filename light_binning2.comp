@@ -22,16 +22,29 @@ struct Plane {
     float d;
 };
 
+struct Sphere {
+    vec3 c;
+    float r;
+};
+
 struct Light {
     vec3 c;
     float r;
 };
 
-layout(binding = 3, std430) buffer uniform_buffer { 
-    vec2 screen_dimensions;
-    vec2 pixel_size_at_1;
+#define FRUSTUM_SIDE_LEFT 0
+#define FRUSTUM_SIDE_RIGHT 1
+#define FRUSTUM_SIDE_TOP 2
+#define FRUSTUM_SIDE_BOT 3
+struct View_Frustum {
     float near_plane;
     float far_plane;
+
+    Plane sides[4];
+};
+
+layout(binding = 3, std430) buffer uniform_buffer { 
+    vec2 screen_dimensions;
     uint light_count;
     mat4 projection;
     mat4 inverse_projection;
@@ -54,6 +67,8 @@ shared uint o_tile_light_list[MAX_LIGHTS_PER_TILE];
 shared uint t_tile_light_count;
 shared uint t_tile_light_index_start;
 shared uint t_tile_light_list[MAX_LIGHTS_PER_TILE];
+
+uniform vec2 u_pixel_size_at_1;
 
 vec4 clip_to_view(vec4 clip)
 {
@@ -82,9 +97,21 @@ float point_plane_signed_dist(vec3 point, Plane plane)
     return dot(plane.n, point) - plane.d;
 }
 
-bool is_sphere_behind_plane(vec3 sphere_center, float sphere_radius, Plane plane)
+bool is_sphere_behind_plane(Sphere sphere, Plane plane)
 {
-    return point_plane_signed_dist(sphere_center, plane) < -sphere_radius;
+    return point_plane_signed_dist(sphere.c, plane) < -sphere.r;
+}
+
+bool is_sphere_partially_inside_frustum(Sphere sphere, View_Frustum frustum)
+{
+    if (sphere.c.z - sphere.r > frustum.near_plane || sphere.c.z + sphere.r < frustum.far_plane)
+        return false;
+ 
+    for(int i = 0; i < 4; i++)
+        if(is_sphere_behind_plane(sphere, frustum.sides[i]));
+            return false;
+ 
+    return true;
 }
 
 //p0 is center point.
@@ -107,15 +134,20 @@ float point_line_dist(vec3 line_offset, vec3 line_dir, vec3 point)
     return length(base - point_dir);
 }
 
+float point_line_dist_one_sided(vec3 line_offset, vec3 line_dir, vec3 point, float min_r)
+{
+    vec3 point_dir = point - line_offset;
+    float scale = dot(line_dir, point_dir)/dot(line_dir, line_dir);
+    if(scale < 0)
+        return 1e35;
+    vec3 base = scale*line_dir;
+    return length(base - point_dir);
+}
+
 float LinearizeDepth(float depth, float near, float far) 
 {
     float z = depth * 2.0 - 1.0; // back to NDC 
     return (2.0 * near * far) / (far + near - z * (far - near));	
-}
-
-bool ranges_overlap(float x1, float x2, float y1, float y2)
-{
-    return x1 <= y2 && y1 <= x2;
 }
 
 void main() {
@@ -128,71 +160,54 @@ void main() {
     
     if(gl_LocalInvocationIndex == 0)
     {
-        shared_depth_min = udepth;
+        //shared_depth_min = udepth;
         shared_depth_max = udepth;
 
         o_tile_light_count = 0;
-        o_tile_light_index_start = atomicAdd(o_light_counter, 1);
-        
         t_tile_light_count = 0;
-        t_tile_light_index_start = atomicAdd(t_light_counter, 1);
     }
 
     memoryBarrier();
     barrier();
     
-    atomicMin(shared_depth_min, udepth);
+    //atomicMin(shared_depth_min, udepth);
     atomicMax(shared_depth_max, udepth);
     
     memoryBarrierShared();
     barrier();
 
+    //float min_depth = uintBitsToFloat(shared_depth_min);
     float max_depth = uintBitsToFloat(shared_depth_max);
-    float min_depth = uintBitsToFloat(shared_depth_min);
 
-    float min_depth_view = LinearizeDepth(min_depth, near_plane, far_plane);
-    float max_depth_view = LinearizeDepth(max_depth, near_plane, far_plane);
-    float near_clip_view = LinearizeDepth(0,         near_plane, far_plane);
+    float max_depth_view = LinearizeDepth(max_depth, 0.1, 100);
     
     vec4 center_screen = vec4((gl_WorkGroupID.xy + vec2(0.5))*gl_WorkGroupSize.xy, -1, 1);
     vec4 center_view = screen_to_view(center_screen);
-
-    vec2 tile_size = pixel_size_at_1 * gl_WorkGroupSize.xy;
-    float scale_epsilon = 0.0001;
-    float flat_epsilon = 0.01;
-    float extra_size_at_1 = length(tile_size/2) + scale_epsilon;
+    
+    vec2 tile_size = u_pixel_size_at_1 * gl_WorkGroupSize.xy;
+    float epsilon = 0.005;
+    float extra_size = max(tile_size.x, tile_size.y)/2 + epsilon;
 
     for(uint i = gl_LocalInvocationIndex; i < light_count; i += gl_WorkGroupSize.x*gl_WorkGroupSize.y)
     {
+        vec3 c = lights[i].c;
         float r = lights[i].r;
-        vec3 c = (view*vec4(lights[i].c, 1)).xyz;
-        
-        float r_at_z = r + extra_size_at_1*abs(c.z) + flat_epsilon;
+        vec4 sphere_center = view*vec4(c, 1);
+        float z = length(sphere_center.xyz);
 
-        //how far along the viewing direction is the light? 
-        float dist_scale = dot(center_view.xyz, c)/dot(center_view.xyz, center_view.xyz);
+        float sphere_radius = lights[i].r + extra_size*z;
+        float dist = point_line_dist_one_sided(vec3(0), center_view.xyz, sphere_center.xyz, -sphere_radius);
 
-        //2d coordinates to the light
-        float u = length(dist_scale*center_view.xyz);
-        float v = length(dist_scale*center_view.xyz - c);
-
-        //if light intersects this tiles cone  (removes lights in different part of the screen)
-        //and if the light is at least partially in front of the opaque geometry (removes lights entirely behind geometry)
-        if(v < r_at_z && c.z - r <= max_depth_view)   
+        //if center of this pixel is near the light or the viewport is within the light
+        if(dist < sphere_radius || z <= r)
         {
-            //if the light is in front of camera or it is behind but the camera is inside its spehere
-            if(dist_scale >= 0 || r >= length(c))
+            if(t_tile_light_count < MAX_LIGHTS_PER_TILE)
+                t_tile_light_list[atomicAdd(t_tile_light_count, 1)] = i;
+
+            if(sphere_center.z - sphere_radius < max_depth_view)
             {
-                //add to the transparent list always
-                if(t_tile_light_count < MAX_LIGHTS_PER_TILE)
-                    t_tile_light_list[atomicAdd(t_tile_light_count, 1)] = i;
-    
-                //add to the opaque list only if 
-                if(c.z + r >= min_depth_view)
-                {
-                    if(o_tile_light_count < MAX_LIGHTS_PER_TILE)
-                        o_tile_light_list[atomicAdd(o_tile_light_count, 1)] = i;
-                }
+                if(o_tile_light_count < MAX_LIGHTS_PER_TILE)
+                    o_tile_light_list[atomicAdd(o_tile_light_count, 1)] = i;
             }
         }
     }
@@ -202,9 +217,14 @@ void main() {
 
     if(gl_LocalInvocationIndex == 0)
     {
+        o_tile_light_index_start = atomicAdd(o_light_counter, o_tile_light_count);
+        t_tile_light_index_start = atomicAdd(t_light_counter, t_tile_light_count);
+
         imageStore(o_light_tiles, ivec2(gl_WorkGroupID.xy), uvec4(o_tile_light_index_start, o_tile_light_count, 0, 0));
         imageStore(t_light_tiles, ivec2(gl_WorkGroupID.xy), uvec4(t_tile_light_index_start, t_tile_light_count, 0, 0));
     }
+    
+    barrier();
 
     for (uint i = gl_LocalInvocationIndex; i < o_tile_light_count; i += gl_WorkGroupSize.x*gl_WorkGroupSize.y)
         o_light_indices[o_tile_light_index_start + i] = o_tile_light_list[i];

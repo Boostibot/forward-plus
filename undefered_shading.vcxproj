@@ -167,7 +167,8 @@
     <ClInclude Include="lib\arena.h" />
     <ClInclude Include="lib\hash_index.h" />
     <ClInclude Include="lib\list.h" />
-    <ClInclude Include="lib\log_list.h" />
+    <ClInclude Include="lib\log.h" />
+    <ClInclude Include="lib\_log_list.h" />
     <ClInclude Include="lib\lpf.h" />
     <ClInclude Include="lib\profile.h" />
     <ClInclude Include="lib\profile_defs.h" />
@@ -184,7 +185,6 @@
     <ClInclude Include="gl_utils\gl_frame_buffers.h" />
     <ClInclude Include="gl_utils\gl_pixel_format.h" />
     <ClInclude Include="gl_utils\gl_shader_util.h" />
-    <ClInclude Include="gl_utils\gl_texture_util.h" />
     <ClInclude Include="image_loader.h" />
     <ClInclude Include="lib\allocator.h" />
     <ClInclude Include="lib\allocator_debug.h" />
@@ -197,7 +197,7 @@
     <ClInclude Include="lib\hash.h" />
     <ClInclude Include="lib\hash_string.h" />
     <ClInclude Include="lib\image.h" />
-    <ClInclude Include="lib\log.h" />
+    <ClInclude Include="lib\old_log.h" />
     <ClInclude Include="lib\log_file.h" />
     <ClInclude Include="lib\math.h" />
     <ClInclude Include="lib\parse.h" />
@@ -231,6 +231,9 @@
     <None Include="fullscreen_quad.frag" />
     <None Include="fullscreen_quad.vert" />
     <None Include="light_binning.comp" />
+    <None Include="light_binning2.comp" />
+    <None Include="min_max_reduction.comp" />
+    <None Include="min_max_reduction_simple.comp" />
     <None Include="new_shaders\deferred_light_box.frag" />
     <None Include="new_shaders\deferred_light_box.vert" />
     <None Include="new_shaders\deferred_shading.frag" />

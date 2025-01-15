@@ -441,7 +441,7 @@ JMAPI Vec3 mat4_apply(Mat4 mat, Vec3 vec)
 {
     Vec4 homo = vec4_homo_from_vec3(vec);
     Vec4 muled = mat4_mul_vec4(mat, homo);
-    Vec3 result = vec3_from_vec4_homo(muled);
+    Vec3 result = vec3_from_vec4(muled);
     return result;
 }
 
@@ -821,15 +821,17 @@ JMAPI Mat4 mat4_inverse_nonuniform_scale(Mat4 mat)
 }
 
 //Makes a perspective projection matrix so that the output is in ranage [-1, 1] in all dimensions (OpenGL standard)
-JMAPI Mat4 mat4_perspective_projection(float fov_radians, float width_over_height, float near, float far) 
+JMAPI Mat4 mat4_perspective_projection(float fov_radians, float width_over_height, float near_plane, float far_plane) 
 { 
     ASSERT(fov_radians != 0);
-    ASSERT(near != far);
+    ASSERT(near_plane != far_plane);
     ASSERT(width_over_height != 0);
 
     //https://ogldev.org/www/tutorial12/tutorial12.html
-	float fo = 1.0f / tanf(fov_radians / 2.0f);
-	float ar = width_over_height, n = near, f = far;
+	float fo = 1 / tanf(fov_radians/2);
+	float ar = width_over_height; 
+    float n = near_plane;
+    float f = far_plane;
 	Mat4 result = mat4(
 		 fo / ar,     0,           0,            0,
 		 0,           fo,          0,            0,
@@ -839,13 +841,15 @@ JMAPI Mat4 mat4_perspective_projection(float fov_radians, float width_over_heigh
     return result;
 } 
 
-JMAPI Mat4 mat4_ortographic_projection(float bottom, float top, float left, float right, float near, float far) 
+JMAPI Mat4 mat4_ortographic_projection(float bottom, float top, float left, float right, float near_plane, float far_plane) 
 {
     ASSERT(bottom != top);
+    ASSERT(near_plane != far_plane);
     ASSERT(left != right);
-    ASSERT(near != far);
 
-    float l = left, r = right, b = bottom, t = top, n = near, f = far;
+    float l = left, r = right, b = bottom, t = top;
+    float n = near_plane;
+    float f = far_plane;
 	float tx = -(r + l) / (r - l);
 	float ty = -(t + b) / (t - b);
 	float tz = -(f + n) / (f - n);
@@ -889,6 +893,41 @@ JMAPI Mat4 mat4_look_at(Vec3 camera_pos, Vec3 camera_target, Vec3 camera_up_dir)
         0,   0,   0,   1
     );
 }
+
+JMAPI Vec2 vec2_view_size_at_z(float fov_radians, float screen_width_over_height, float z)
+{
+    Vec2 out = {0};
+    out.y = 2*tanf(fov_radians/2)*z;
+    out.x = out.y*screen_width_over_height;
+    return out;
+}
+JMAPI Vec2 vec2_pixel_size_at_z(float fov_radians, float screen_width_in_pixels, float screen_height_in_pixels, float z)
+{
+    if(screen_width_in_pixels == 0 || screen_height_in_pixels == 0)
+        return vec2_of(0);
+
+    Vec2 screen_size = vec2_view_size_at_z(fov_radians, screen_width_in_pixels/screen_height_in_pixels, z);
+    Vec2 pixel_size = vec2_pairwise_div(screen_size, vec2(screen_width_in_pixels, screen_height_in_pixels));
+    return pixel_size;
+}
+
+JMAPI Vec3 vec3_unproject_ndc(Mat4 inv_projection, Vec3 ndc)
+{
+    Vec4 homo = vec4_homo_from_vec3(ndc);
+    Vec4 muled = mat4_mul_vec4(inv_projection, homo);
+    Vec3 result = vec3_from_vec4_homo(muled);
+    return result;
+}
+
+JMAPI Vec3 vec3_unproject(Mat4 inv_projection, Vec2 screen_0_to_1, float z, float near_plane, float far_plane)
+{
+    Vec3 ndc = {0};
+    ndc.x = 2*screen_0_to_1.x - 1;
+    ndc.y = 2*screen_0_to_1.y - 1;
+    ndc.z = (z - near_plane)/(far_plane - near_plane);
+    return vec3_unproject_ndc(inv_projection, ndc);
+}
+
 
 //Represents a physics convention spehircal coordinates
 // where phi is rotation from X axis towards Z axis

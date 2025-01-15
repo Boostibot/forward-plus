@@ -43,6 +43,7 @@
 unsigned int loadTexture(const char *path, bool gammaCorrection);
 void renderQuad();
 void renderCube();
+void renderSphere();
 
 // settings
 #define SCR_WIDTH 1400
@@ -395,11 +396,15 @@ typedef struct Frustum_Planes {
 
 typedef struct Forward_Plus_Buffers {
     Render_Shader compute;
+    Render_Shader reduction_min_max;
+    Render_Shader reduction_min_max_simple;
     GLuint framebuffer_depth;
 
     GLuint tex_debug;
     GLuint tex_depth;
-    GLuint tex_depth2;
+    GLuint tex_depth_copy;
+    GLuint tex_depth_min_max;
+    GLuint tex_depth_min_max_copy;
     GLuint tex_color;
     GLuint tex_o_light_tiles;
     GLuint tex_t_light_tiles;
@@ -432,6 +437,9 @@ typedef struct Forward_Plus_Light {
 
 typedef struct Forward_Plus_Uniform_Buffer {
     ATTRIBUTE_ALIGNED(8) Vec2 screen_dimensions;
+    ATTRIBUTE_ALIGNED(8) Vec2 pixel_size_at_1;
+    ATTRIBUTE_ALIGNED(4) f32 near_plane;
+    ATTRIBUTE_ALIGNED(4) f32 far_plane;
     ATTRIBUTE_ALIGNED(4) u32 light_count;
     ATTRIBUTE_ALIGNED(4) u32 _padding;
     ATTRIBUTE_ALIGNED(16) Mat4 projection;
@@ -473,12 +481,28 @@ Forward_Plus_Buffers make_forward_plus_buffers(i32 tex_width, i32 tex_height, i3
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
     
-	glGenTextures(1, &out.tex_depth2);
+	glGenTextures(1, &out.tex_depth_copy);
 	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(GL_TEXTURE_2D, out.tex_depth2);
+	glBindTexture(GL_TEXTURE_2D, out.tex_depth_copy);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, (GLuint) tex_width + pad, (GLuint) tex_height + pad, 0, GL_RED, GL_FLOAT, NULL);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+	glGenTextures(1, &out.tex_depth_min_max);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, out.tex_depth_min_max);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, (GLuint) tex_width + pad, (GLuint) tex_height + pad, 0, GL_RG, GL_FLOAT, NULL);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    
+	glGenTextures(1, &out.tex_depth_min_max_copy);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, out.tex_depth_min_max_copy);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, (GLuint) tex_width + pad, (GLuint) tex_height + pad, 0, GL_RG, GL_FLOAT, NULL);
     glBindTexture(GL_TEXTURE_2D, 0);
 
 	glGenTextures(1, &out.tex_debug);
@@ -543,9 +567,10 @@ Forward_Plus_Buffers make_forward_plus_buffers(i32 tex_width, i32 tex_height, i3
 
     out.group_size_x = 16;
     out.group_size_y = 16;
-    compute_shader_init_from_disk(&out.compute, STRING("light_binning.comp"), 16, 16, 1);
-    //compute_shader_init_from_disk(&out.compute, STRING("new_shaders/image_copy.comp"), 16, 16, 1);
-
+    compute_shader_init_from_disk(&out.compute, STRING("light_binning.comp"), out.group_size_x, out.group_size_y, 1);
+    compute_shader_init_from_disk(&out.reduction_min_max, STRING("min_max_reduction.comp"), out.group_size_x, out.group_size_y, 1);
+    compute_shader_init_from_disk(&out.reduction_min_max_simple, STRING("min_max_reduction_simple.comp"), out.group_size_x, out.group_size_y, 1);
+    
     return out;
 }
 
@@ -600,6 +625,7 @@ int main()
     gladSetGLOnDemandLoader((GLADloadfunc) glfwGetProcAddress);
     gl_debug_output_enable();
 
+
     // build and compile shaders
     Render_Shader shaderGeometryPass = {0};
     Render_Shader shaderLightingPass = {0};
@@ -635,7 +661,7 @@ int main()
         float x = random_interval_f32(-6, 6);
         float y = random_interval_f32(-6, 6);
         float z = random_interval_f32(-6, 6);
-        float R = random_interval_f32(0.5, 2);
+        float R = random_interval_f32(0.5f, 4);
         array_push(&lights, vec4(x, y, z, R));
         
         float r = random_interval_f32(0.5f, 1);
@@ -643,7 +669,6 @@ int main()
         float b = random_interval_f32(0.5f, 1);
         array_push(&lights_color, vec3(r, g, b));
     }
-    glEnable(GL_DEPTH_TEST);
     
     render_shader_use(&shaderLightingPass);
     render_shader_set_i32(&shaderLightingPass, "gPosition", 0);
@@ -665,7 +690,9 @@ int main()
         if(app.curr.framebuffer_width != app.prev.framebuffer_width || app.curr.framebuffer_height != app.prev.framebuffer_height)
             glViewport(0, 0, app.curr.framebuffer_width, app.curr.framebuffer_height);
         
-        
+        glDisable(GL_BLEND);
+        glEnable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
         Mat4 projection = camera_get_projection_matrix(app.curr.camera);
         Mat4 view = camera_get_view_matrix(app.curr.camera);
 
@@ -690,43 +717,79 @@ int main()
         // Somehow... for some reason... I hate Opengl with passion.
         glCopyImageSubData(
             forward_plus_buffers.tex_depth, GL_TEXTURE_2D, 0, 0, 0, 0,
-            forward_plus_buffers.tex_depth2, GL_TEXTURE_2D, 0, 0, 0, 0,
+            forward_plus_buffers.tex_depth_copy, GL_TEXTURE_2D, 0, 0, 0, 0,
             SCR_WIDTH, SCR_HEIGHT, 1);
 
-        
-        Forward_Plus_Uniform_Buffer uniforms = {0};
-        uniforms.screen_dimensions = vec2(SCR_WIDTH, SCR_HEIGHT);
-        uniforms.light_count = (u32) lights.size;
-        uniforms.projection = projection;
-        uniforms.inverse_projection = mat4_inverse(projection);
-        uniforms.view = view;
+        if(1)
+        {
+            Forward_Plus_Uniform_Buffer uniforms = {0};
+            uniforms.screen_dimensions = vec2(SCR_WIDTH, SCR_HEIGHT);
+            uniforms.pixel_size_at_1 = vec2_pixel_size_at_z(app.curr.fov, (f32) app.curr.framebuffer_width, (f32) app.curr.framebuffer_height, 1);
+            uniforms.near_plane = app.curr.camera.near_plane;
+            uniforms.far_plane = app.curr.camera.far_plane;
+            uniforms.light_count = (u32) lights.size;
+            uniforms.projection = projection;
+            uniforms.inverse_projection = mat4_inverse(projection);
+            uniforms.view = view;
 
-        u32 zero_counter = 0;
-        glNamedBufferSubData(forward_plus_buffers.buff_uniform, 0, sizeof uniforms, &uniforms);
-        glNamedBufferSubData(forward_plus_buffers.buff_lights, 0, array_byte_size(lights), lights.data);
-        glNamedBufferSubData(forward_plus_buffers.buff_o_light_counter, 0, sizeof zero_counter, &zero_counter);
-        glNamedBufferSubData(forward_plus_buffers.buff_t_light_counter, 0, sizeof zero_counter, &zero_counter);
+            u32 zero_counter = 0;
+            glNamedBufferSubData(forward_plus_buffers.buff_uniform, 0, sizeof uniforms, &uniforms);
+            glNamedBufferSubData(forward_plus_buffers.buff_lights, 0, array_byte_size(lights), lights.data);
+            glNamedBufferSubData(forward_plus_buffers.buff_o_light_counter, 0, sizeof zero_counter, &zero_counter);
+            glNamedBufferSubData(forward_plus_buffers.buff_t_light_counter, 0, sizeof zero_counter, &zero_counter);
 
-        render_shader_use(&forward_plus_buffers.compute);
-        compute_texture_bind(forward_plus_buffers.tex_depth2, GL_READ_ONLY, GL_R32F, 0);
-        compute_texture_bind(forward_plus_buffers.tex_o_light_tiles, GL_WRITE_ONLY, GL_RG32UI, 1);
-        compute_texture_bind(forward_plus_buffers.tex_t_light_tiles, GL_WRITE_ONLY, GL_RG32UI, 2);
-        compute_texture_bind(forward_plus_buffers.tex_debug, GL_WRITE_ONLY, GL_RGBA32F, 3);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, forward_plus_buffers.buff_uniform);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, forward_plus_buffers.buff_lights);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, forward_plus_buffers.buff_o_light_counter);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, forward_plus_buffers.buff_t_light_counter);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, forward_plus_buffers.buff_o_light_indices);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 8, forward_plus_buffers.buff_t_light_indices);
+            render_shader_use(&forward_plus_buffers.compute);
+            compute_texture_bind(forward_plus_buffers.tex_depth_copy, GL_READ_ONLY, GL_R32F, 0);
+            compute_texture_bind(forward_plus_buffers.tex_o_light_tiles, GL_WRITE_ONLY, GL_RG32UI, 1);
+            compute_texture_bind(forward_plus_buffers.tex_t_light_tiles, GL_WRITE_ONLY, GL_RG32UI, 2);
+            compute_texture_bind(forward_plus_buffers.tex_debug, GL_WRITE_ONLY, GL_RGBA32F, 3);
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, forward_plus_buffers.buff_uniform);
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, forward_plus_buffers.buff_lights);
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, forward_plus_buffers.buff_o_light_counter);
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, forward_plus_buffers.buff_t_light_counter);
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, forward_plus_buffers.buff_o_light_indices);
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 8, forward_plus_buffers.buff_t_light_indices);
+            
+            glMemoryBarrier(GL_ALL_BARRIER_BITS);
+            compute_shader_dispatch(&forward_plus_buffers.compute, SCR_WIDTH, SCR_HEIGHT, 1);
+		    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+        }
+        else
+        {
+            render_shader_use(&forward_plus_buffers.reduction_min_max);
+            compute_texture_bind(forward_plus_buffers.tex_depth_copy, GL_READ_ONLY, GL_R32F, 0);
+            compute_texture_bind(forward_plus_buffers.tex_depth_min_max, GL_WRITE_ONLY, GL_RG32F, 1);
+            
+            {
+                double before = clock_s();
+                glMemoryBarrier(GL_ALL_BARRIER_BITS);
+                compute_shader_dispatch(&forward_plus_buffers.reduction_min_max, SCR_WIDTH, SCR_HEIGHT, 1);
+		        glMemoryBarrier(GL_ALL_BARRIER_BITS);
+                double after = clock_s();
 
-        glMemoryBarrier(GL_ALL_BARRIER_BITS);
-        compute_shader_dispatch(&forward_plus_buffers.compute, SCR_WIDTH, SCR_HEIGHT, 1);
-		glMemoryBarrier(GL_ALL_BARRIER_BITS);
+                LOG_INFO("time", "complex: %e", after - before);
+            }
+            
+            render_shader_use(&forward_plus_buffers.reduction_min_max);
+            compute_texture_bind(forward_plus_buffers.tex_depth_copy, GL_READ_ONLY, GL_R32F, 0);
+            compute_texture_bind(forward_plus_buffers.tex_depth_min_max, GL_WRITE_ONLY, GL_RG32F, 1);
+            
+            {
+                double before = clock_s();
+                glMemoryBarrier(GL_ALL_BARRIER_BITS);
+                compute_shader_dispatch(&forward_plus_buffers.reduction_min_max_simple, SCR_WIDTH, SCR_HEIGHT, 1);
+		        glMemoryBarrier(GL_ALL_BARRIER_BITS);
+                double after = clock_s();
+
+                LOG_INFO("time", "simple: %e", after - before);
+            }
+        }
         
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         
         render_shader_use(&shader_fullscreen_quad);
+
         render_shader_set_i32(&shader_fullscreen_quad, "u_tex_depth", 0);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, forward_plus_buffers.tex_depth);
@@ -738,7 +801,7 @@ int main()
         render_shader_set_i32(&shader_fullscreen_quad, "u_tex_debug", 2);
         glActiveTexture(GL_TEXTURE2);
         glBindTexture(GL_TEXTURE_2D, forward_plus_buffers.tex_debug);
-
+        
         glDepthMask(false);
         renderQuad();
         glDepthMask(true);
@@ -748,11 +811,24 @@ int main()
         render_shader_set_mat4(&shaderLightBox, "view", view);
         for (unsigned int i = 0; i < lights.size; i++)
         {
-            Mat4 model = mat4_translate(mat4_scaling(vec3_of(0.125f)), vec3_from_vec4(lights.data[i]));
+            Mat4 model = mat4_translate(mat4_scaling(vec3_of(0.1f)), vec3_from_vec4(lights.data[i]));
             render_shader_set_mat4(&shaderLightBox, "model", model);
-            //render_shader_set_vec3(&shaderLightBox, "lightColor", lights_color.data[i]);
-            render_shader_set_vec3(&shaderLightBox, "lightColor", vec3(1, 0, 0));
-            renderCube();
+            render_shader_set_vec4(&shaderLightBox, "lightColor", vec4(1, 0, 0, 1));
+            renderSphere();
+        }
+        
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);  
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+        glFrontFace(GL_CW);  
+        for (unsigned int i = 0; i < lights.size; i++)
+        {
+            Mat4 model = mat4_translate(mat4_scaling(vec3_of(lights.data[i].w)), vec3_from_vec4(lights.data[i]));
+            render_shader_set_mat4(&shaderLightBox, "model", model);
+            render_shader_set_vec4(&shaderLightBox, "lightColor", vec4(1, 0, 0, 0.3f));
+            renderSphere();
         }
 
         glfwSwapBuffers(app.window);
@@ -766,11 +842,10 @@ int main()
 }
 
 // renderCube() renders a 1x1 3D cube in NDC.
-// -------------------------------------------------
-unsigned int cubeVAO = 0;
-unsigned int cubeVBO = 0;
 void renderCube()
 {
+    static unsigned int cubeVAO = 0;
+    static unsigned int cubeVBO = 0;
     // initialize (if necessary)
     if (cubeVAO == 0)
     {
@@ -840,13 +915,11 @@ void renderCube()
     glBindVertexArray(0);
 }
 
-
 // renderQuad() renders a 1x1 XY quad in NDC
-// -----------------------------------------
-unsigned int quadVAO = 0;
-unsigned int quadVBO;
 void renderQuad()
 {
+    static unsigned int quadVAO = 0;
+    static unsigned int quadVBO;
     if (quadVAO == 0)
     {
         float quadVertices[] = {
@@ -872,6 +945,107 @@ void renderQuad()
     glBindVertexArray(0);
 }
 
+void renderSphere()
+{
+    //Taken from: https://learnopengl.com/PBR/Lighting
+    static unsigned int sphereVAO = 0;
+    static unsigned int indexCount = 0;
+    if (sphereVAO == 0)
+    {
+        Arena_Frame arena = scratch_arena_acquire();
+
+        glGenVertexArrays(1, &sphereVAO);
+
+        unsigned int vbo, ebo;
+        glGenBuffers(1, &vbo);
+        glGenBuffers(1, &ebo);
+
+        typedef Array(Vec3) Vec3_Array;
+        typedef Array(Vec2) Vec2_Array;
+
+        Vec3_Array positions = {&arena.allocator};
+        Vec2_Array uv = {&arena.allocator};
+        Vec3_Array normals = {&arena.allocator};
+        u32_Array  indices = {&arena.allocator};
+
+        const unsigned int X_SEGMENTS = 64;
+        const unsigned int Y_SEGMENTS = 64;
+        for (unsigned int x = 0; x <= X_SEGMENTS; ++x)
+        {
+            for (unsigned int y = 0; y <= Y_SEGMENTS; ++y)
+            {
+                float xSegment = (float)x / (float)X_SEGMENTS;
+                float ySegment = (float)y / (float)Y_SEGMENTS;
+                float xPos = cosf(xSegment * 2.0f * PI) * sinf(ySegment * PI);
+                float yPos = cosf(ySegment * PI);
+                float zPos = sinf(xSegment * 2.0f * PI) * sinf(ySegment * PI);
+
+                array_push(&positions,  vec3(xPos, yPos, zPos));
+                array_push(&uv,         vec2(xSegment, ySegment));
+                array_push(&normals,    vec3(xPos, yPos, zPos));
+            }
+        }
+
+        bool oddRow = false;
+        for (unsigned int y = 0; y < Y_SEGMENTS; ++y)
+        {
+            if (!oddRow) // even rows: y == 0, y == 2; and so on
+            {
+                for (unsigned int x = 0; x <= X_SEGMENTS; ++x)
+                {
+                    array_push(&indices, y       * (X_SEGMENTS + 1) + x);
+                    array_push(&indices, (y + 1) * (X_SEGMENTS + 1) + x);
+                }
+            }
+            else
+            {
+                for (int x = X_SEGMENTS; x >= 0; --x)
+                {
+                    array_push(&indices, (y + 1) * (X_SEGMENTS + 1) + x);
+                    array_push(&indices, y       * (X_SEGMENTS + 1) + x);
+                }
+            }
+            oddRow = !oddRow;
+        }
+        indexCount = (unsigned int) indices.size;
+
+        f32_Array data = {&arena.allocator};
+        for (unsigned int i = 0; i < positions.size; ++i)
+        {
+            array_push(&data, positions.data[i].x);
+            array_push(&data, positions.data[i].y);
+            array_push(&data, positions.data[i].z);           
+            if (normals.size > 0)
+            {
+                array_push(&data, normals.data[i].x);
+                array_push(&data, normals.data[i].y);
+                array_push(&data, normals.data[i].z);
+            }
+            if (uv.size > 0)
+            {
+                array_push(&data, uv.data[i].x);
+                array_push(&data, uv.data[i].y);
+            }
+        }
+        glBindVertexArray(sphereVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, data.size * sizeof(float), data.data, GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size * sizeof(unsigned int), indices.data, GL_STATIC_DRAW);
+        unsigned int stride = (3 + 2 + 3) * sizeof(float);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
+        glEnableVertexAttribArray(1);        
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3 * sizeof(float)));
+        glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (void*)(6 * sizeof(float)));      
+        
+        arena_frame_release(&arena);
+    }
+
+    glBindVertexArray(sphereVAO);
+    glDrawElements(GL_TRIANGLE_STRIP, indexCount, GL_UNSIGNED_INT, 0);
+}
 
 void set_default_controls(App_Controls* controls)
 {

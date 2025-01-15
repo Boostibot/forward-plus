@@ -3,7 +3,6 @@
 #include "../lib/file.h"
 #include "../lib/hash_index.h"
 #include "../lib/random.h"
-#include "../lib/log_list.h"
 
 #include "math.h"
 #include "gl.h"
@@ -117,7 +116,6 @@ bool compute_shader_init(Render_Shader* shader, const char* source, String name,
     GLuint compute = glCreateShader(GL_COMPUTE_SHADER);
     glShaderSource(compute, 1, &source, NULL);
     glCompileShader(compute);
-
     if(!shader_check_compile_error(compute, SHADER_COMPILATION_COMPILE, error_string))
     {
         LOG_ERROR(SHADER_UTIL_CHANEL, "error compiling compute shader named '%s'", cstring_ephemeral(name));
@@ -164,12 +162,10 @@ bool render_shader_init(Render_Shader* shader, const char* vertex, const char* f
     
     GLuint shader_program = 0;
     GLuint shader_types[3] = {GL_VERTEX_SHADER, GL_FRAGMENT_SHADER, GL_GEOMETRY_SHADER};
-    GLuint shader_availible[3] = {true, false, false};
     GLuint shaders[3] = {0};
     const char* shader_types_str[3] = {"vertex", "fragment", "geometry"};
     const char* shader_sources[3] = {vertex, fragment, geometry};
-    shader_availible[1] = fragment != NULL && strlen(fragment) != 0;
-    shader_availible[2] = geometry != NULL && strlen(geometry) != 0;
+    bool has_geometry = geometry != NULL && strlen(geometry) != 0;
 
     Arena_Frame arena = scratch_arena_acquire();
     String_Builder error_msg = builder_make(&arena.allocator, 0); 
@@ -177,30 +173,28 @@ bool render_shader_init(Render_Shader* shader, const char* vertex, const char* f
     for(i32 i = 0; i < 3; i++)
     {
         //geometry shader doesnt have to exist
-        if(shader_availible[i])
-        {
-            shaders[i] = glCreateShader(shader_types[i]);
-            glShaderSource(shaders[i], 1, &shader_sources[i], NULL);
-            glCompileShader(shaders[i]);
+        if(shader_types[i] == GL_GEOMETRY_SHADER && has_geometry == false)
+            break;
 
-            //Check for errors
-            if(!shader_check_compile_error(shaders[i], SHADER_COMPILATION_COMPILE, &error_msg))
-            {
-                LOG_ERROR(SHADER_UTIL_CHANEL, "compiling %s shader failed '%s'", shader_types_str[i], cstring_ephemeral(name));
-                LOG_ERROR(">" SHADER_UTIL_CHANEL, "%s", error_msg.data);
-                state = false;
-            }
+        shaders[i] = glCreateShader(shader_types[i]);
+        glShaderSource(shaders[i], 1, &shader_sources[i], NULL);
+        glCompileShader(shaders[i]);
+
+        //Check for errors
+        if(!shader_check_compile_error(shaders[i], SHADER_COMPILATION_COMPILE, &error_msg))
+        {
+            LOG_ERROR(SHADER_UTIL_CHANEL, "compiling %s shader failed '%s'", shader_types_str[i], cstring_ephemeral(name));
+            LOG_ERROR(">" SHADER_UTIL_CHANEL, "%s", error_msg.data);
+            state = false;
         }
     }
         
     if(state)
     {
         shader_program = glCreateProgram();
-        if(shader_availible[0])
-            glAttachShader(shader_program, shaders[0]);
-        if(shader_availible[1])
-            glAttachShader(shader_program, shaders[1]);
-        if(shader_availible[2])
+        glAttachShader(shader_program, shaders[0]);
+        glAttachShader(shader_program, shaders[1]);
+        if(has_geometry)
             glAttachShader(shader_program, shaders[2]);
             
         glLinkProgram(shader_program);
@@ -298,7 +292,6 @@ Compute_Shader_Limits compute_shader_query_limits()
     return querried;
 }
 
-
 bool compute_shader_init_from_disk(Render_Shader* shader, String path, isize work_group_x, isize work_group_y, isize work_group_z)
 {
     Compute_Shader_Limits limits = compute_shader_query_limits();
@@ -319,24 +312,21 @@ bool compute_shader_init_from_disk(Render_Shader* shader, String path, isize wor
     bool state = true;
     Arena_Frame arena = scratch_arena_acquire();
     {
-        Log_List log_list = {0};
-        log_list_init_capture(&log_list, &arena.allocator);
             String_Builder source = builder_make(&arena.allocator, 0);
-            state = state && file_read_entire(path, &source);
+            state = state && file_read_entire(path, &source, log_error("SHADER"));
 
             String_Builder prepended_source = render_shader_source_prepend(source.string, prepend, &arena.allocator);
             String_Builder error_string = builder_make(&arena.allocator, 0);
 
-            //LOG_DEBUG(SHADER_UTIL_CHANEL, "Compute shader source:\n%s", prepended_source.data);
+            LOG_DEBUG(SHADER_UTIL_CHANEL, "Compute shader source:\n%s", prepended_source.data);
             state = state && compute_shader_init(shader, prepended_source.data, name, &error_string);
 
-        log_capture_end(&log_list);
 
         if(state == false)
         {
-            LOG_ERROR_CHILD(SHADER_UTIL_CHANEL, "compile error", NULL, "compute_shader_init_from_disk() failed: ");
+            LOG_ERROR(SHADER_UTIL_CHANEL, "compile error! render_shader_init_from_disk() failed!");
                 LOG_INFO(">" SHADER_UTIL_CHANEL, "path: '%s'", cstring_ephemeral(path));
-                LOG_ERROR(">" SHADER_UTIL_CHANEL, "error: %s", error_string.data);
+                LOG_INFO(">" SHADER_UTIL_CHANEL, "errors:\n%s", error_string.data);
         }
         else
         {
@@ -356,23 +346,18 @@ bool render_shader_init_from_disk_split(Render_Shader* shader, String vertex_pat
     bool state = true;
     Arena_Frame arena = scratch_arena_acquire();
     {
-        Log_List log_list = {0};
-        log_list_init_capture(&log_list, &arena.allocator);
 
         String_Builder vertex_source = builder_make(&arena.allocator, 0);
         String_Builder fragment_source = builder_make(&arena.allocator, 0);
         String_Builder geometry_source = builder_make(&arena.allocator, 0);
         
         String name = path_get_filename_without_extension(path_parse(fragment_path));
-        bool vertex_state = file_read_entire(vertex_path, &vertex_source);
-        bool fragment_state = true;
+        bool vertex_state = file_read_entire(vertex_path, &vertex_source, log_error(SHADER_UTIL_CHANEL));
+        bool fragment_state = file_read_entire(fragment_path, &fragment_source, log_error(SHADER_UTIL_CHANEL));
         bool geometry_state = true;
 
-        if(fragment_path.size > 0)
-            file_read_entire(fragment_path, &fragment_source);
-
         if(geometry_path.size > 0)
-            geometry_state = file_read_entire(geometry_path, &geometry_source);
+            geometry_state = file_read_entire(geometry_path, &geometry_source, log_error(SHADER_UTIL_CHANEL));
 
         state = vertex_state && fragment_state && geometry_state;
         state = state &&render_shader_init(shader,
@@ -381,15 +366,12 @@ bool render_shader_init_from_disk_split(Render_Shader* shader, String vertex_pat
             geometry_source.data,
             name);
             
-        log_capture_end(&log_list);
-
         if(state == false)
         {
-            LOG_ERROR_CHILD(SHADER_UTIL_CHANEL, "compile error", NULL, "render_shader_init_from_disk() failed!");
+            LOG_ERROR(SHADER_UTIL_CHANEL, "compile error! render_shader_init_from_disk() failed!");
                 LOG_INFO(">" SHADER_UTIL_CHANEL, "vertex:   '%s'", cstring_ephemeral(vertex_path));
                 LOG_INFO(">" SHADER_UTIL_CHANEL, "fragment: '%s'", cstring_ephemeral(fragment_path));
                 LOG_INFO(">" SHADER_UTIL_CHANEL, "geometry: '%s'", cstring_ephemeral(geometry_path));
-                LOG_ERROR_CHILD(">" SHADER_UTIL_CHANEL, "", log_list.first, "errors:");
         }
     }
     arena_frame_release(&arena);
@@ -405,13 +387,11 @@ bool render_shader_init_from_disk(Render_Shader* shader, String path)
     bool state = true;
     Arena_Frame arena = scratch_arena_acquire();
     {
-        Log_List log_list = {0};
-        log_list_init_capture(&log_list, &arena.allocator);
 
         String_Builder source_text = builder_make(&arena.allocator, 0);
 
         String name = path_get_filename_without_extension(path_parse(path));
-        state = state && file_read_entire(path, &source_text);
+        state = state && file_read_entire(path, &source_text, log_error(SHADER_UTIL_CHANEL));
         String source = source_text.string;
         
         String_Builder vertex_source = render_shader_source_prepend(source, STRING("#define VERT"), &arena.allocator);
@@ -427,12 +407,11 @@ bool render_shader_init_from_disk(Render_Shader* shader, String path)
             geometry_source.data,
             name);
 
-        log_capture_end(&log_list);
         if(state == false)
         {
-            LOG_ERROR_CHILD(SHADER_UTIL_CHANEL, "compile error", NULL, "render_shader_init_from_disk() failed: ");
-                LOG_INFO(">" SHADER_UTIL_CHANEL, "path: '%s'", cstring_ephemeral(path));
-                LOG_ERROR_CHILD(">" SHADER_UTIL_CHANEL, "", log_list.first, "errors:");
+            //LOG_ERROR_CHILD(SHADER_UTIL_CHANEL, "compile error", NULL, "render_shader_init_from_disk() failed: ");
+                //LOG_INFO(">" SHADER_UTIL_CHANEL, "path: '%s'", cstring_ephemeral(path));
+                //LOG_ERROR_CHILD(">" SHADER_UTIL_CHANEL, "", log_list.first, "errors:");
         }
         
     }
@@ -538,6 +517,17 @@ bool render_shader_set_f32(Render_Shader* shader, const char* name, f32 val)
     return true;
 }
 
+bool render_shader_set_vec2(Render_Shader* shader, const char* name, Vec2 val)
+{
+    render_shader_use(shader);
+    GLint location = render_shader_get_uniform_location(shader, name);
+    if(location == -1)
+        return false;
+
+    glUniform2fv(location, 1, AS_FLOATS(val));
+    return true;
+}
+
 bool render_shader_set_vec3(Render_Shader* shader, const char* name, Vec3 val)
 {
     render_shader_use(shader);
@@ -546,6 +536,17 @@ bool render_shader_set_vec3(Render_Shader* shader, const char* name, Vec3 val)
         return false;
 
     glUniform3fv(location, 1, AS_FLOATS(val));
+    return true;
+}
+
+bool render_shader_set_vec4(Render_Shader* shader, const char* name, Vec4 val)
+{
+    render_shader_use(shader);
+    GLint location = render_shader_get_uniform_location(shader, name);
+    if(location == -1)
+        return false;
+
+    glUniform4fv(location, 1, AS_FLOATS(val));
     return true;
 }
 

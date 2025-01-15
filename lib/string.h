@@ -69,6 +69,7 @@ EXTERNAL void builder_clear(String_Builder* builder);
 EXTERNAL void builder_push(String_Builder* builder, char c);             
 EXTERNAL char builder_pop(String_Builder* builder);             
 EXTERNAL void builder_append(String_Builder* builder, String string); //Appends a string
+EXTERNAL void builder_append_line(String_Builder* builder, String string); //Appends a string followed by newline
 EXTERNAL void builder_assign(String_Builder* builder, String string); //Sets the contents of the builder to be equal to string
 EXTERNAL bool builder_is_equal(String_Builder a, String_Builder b); //Returns true if the contents and sizes of the strings match
 EXTERNAL int  builder_compare(String_Builder a, String_Builder b); //Compares sizes and then lexographically the contents. Shorter strings are placed before longer ones.
@@ -490,6 +491,16 @@ EXTERNAL bool char_is_id(char c);
         builder_reserve(builder, builder->size+string.size);
         memcpy(builder->data + builder->size, string.data, (size_t) string.size);
         builder->size += string.size;
+        ASSERT(_builder_is_invariant(builder));
+    }
+
+    EXTERNAL void builder_append_line(String_Builder* builder, String string)
+    {
+        ASSERT(string.size >= 0);
+        builder_reserve(builder, builder->size+string.size + 1);
+        memcpy(builder->data + builder->size, string.data, (size_t) string.size);
+        builder->data[builder->size + string.size] = '\n';
+        builder->size += string.size + 1;
         ASSERT(_builder_is_invariant(builder));
     }
 
